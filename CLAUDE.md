@@ -18,6 +18,7 @@ Two components:
 | `ssh` | SSH wrapper (→ `~/.local/bin/`) |
 | `config.json` | Account list + agent settings (→ `~/.config/psono-agent/`) |
 | `psono-ssh-agent.service` | Systemd unit (→ `~/.config/systemd/user/`) |
+| `ssh-completion.bash` | Bash completion for ssh wrapper (→ `~/.local/share/bash-completion/completions/ssh`) |
 | `setup.sh` | Interactive first-time setup |
 | `psonoci.toml.example` | Template for psonoci credentials |
 
