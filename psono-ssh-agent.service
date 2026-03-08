@@ -4,7 +4,7 @@ After=default.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 %h/.local/bin/psono-ssh-agent.py
+ExecStart=/usr/bin/bash %h/.local/bin/psono-ssh-agent.sh
 Restart=on-failure
 RestartSec=5
 

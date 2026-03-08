@@ -8,7 +8,7 @@ Private keys never touch disk — fetched from Psono on demand and held only in 
 
 Two components work together:
 
-### 1. `psono-ssh-agent.py` — Background Daemon
+### 1. `psono-ssh-agent.sh` — Background Daemon
 
 Manages a real `ssh-agent` process loaded with all SSH keys from configured Psono accounts.
 
@@ -17,18 +17,18 @@ Manages a real `ssh-agent` process loaded with all SSH keys from configured Pson
 - Keys are loaded with `--key-lifetime` so they auto-expire; daemon re-adds them before expiry
 - Runs as a systemd user service
 
-### 2. `~/.local/bin/ssh` — SSH Wrapper
+### 2. `ssh` — SSH Wrapper
 
 Intercepts every `ssh` invocation to load only the relevant key for the target host.
 
 ```
-ssh openwrt
+ssh dev-server
   │
-  ├─ lookup Psono: title = "openwrt"
-  ├─ resolve HostName from notes field: "192.168.50.1"
+  ├─ lookup Psono: title = "dev-server"
+  ├─ parse notes → -o HostName=10.0.0.5 -o Port=2222 -o User=ubuntu
   ├─ start temp ssh-agent (/tmp/psono-ssh-PID.sock)
   ├─ psonoci ssh add <secret_id>  ← only this one key
-  ├─ /usr/bin/ssh -o IdentityAgent=/tmp/psono-ssh-PID.sock 192.168.50.1
+  ├─ /usr/bin/ssh -o IdentityAgent=... -o HostName=... -o Port=... -o User=... dev-server
   └─ cleanup: kill temp agent, delete socket
 ```
 
@@ -38,15 +38,41 @@ If no Psono secret matches the host, the wrapper passes through to `/usr/bin/ssh
 
 ## Psono Secret Format
 
-Each SSH key secret must be configured as follows:
+Each SSH key secret in Psono:
 
-| Psono Field | SSH Meaning | Example |
-|-------------|-------------|---------|
-| `title`     | `Host` alias (what you type) | `openwrt` |
-| `notes`     | `HostName` (actual IP or FQDN) | `192.168.50.1` |
+| Psono Field | Purpose | Example |
+|-------------|---------|---------|
+| `title`     | SSH Host alias (what you type after `ssh`) | `dev-server` |
+| `notes`     | SSH config directives, one per line | see below |
 | SSH Key     | The private/public key pair | ED25519, RSA, ECDSA |
 
-If `notes` is empty, the host alias is used as-is for the connection.
+The `notes` field uses standard `~/.ssh/config` syntax:
+
+```
+HostName 10.0.0.5
+Port 2222
+User ubuntu
+```
+
+Any SSH config directive is supported — `HostName`, `Port`, `User`, `ProxyCommand`, `ForwardAgent`, etc. Each line is passed to SSH as `-o Key=Value`.
+
+**Examples:**
+
+Simple host:
+```
+HostName 192.168.50.1
+User root
+```
+
+Host behind Cloudflare Tunnel:
+```
+HostName dev.dummy.com
+Port 22
+User ubuntu
+ProxyCommand /usr/local/bin/cloudflared access ssh --hostname %h
+```
+
+If `notes` is empty, the host alias is used as-is (equivalent to running `ssh <title>` with no extra options).
 
 Multiple Psono accounts are supported. The wrapper searches all accounts in order.
 
@@ -54,7 +80,7 @@ Multiple Psono accounts are supported. The wrapper searches all accounts in orde
 
 | File | Purpose |
 |------|---------|
-| `~/.local/bin/psono-ssh-agent.py` | Background daemon |
+| `~/.local/bin/psono-ssh-agent.sh` | Background daemon |
 | `~/.local/bin/ssh` | SSH wrapper |
 | `~/.config/psono-agent/config.json` | Configuration |
 | `~/.config/systemd/user/psono-ssh-agent.service` | Systemd unit |
@@ -82,7 +108,7 @@ Multiple Psono accounts are supported. The wrapper searches all accounts in orde
 | `accounts` | — | List of Psono accounts with their `psonoci` config paths |
 | `socket_path` | `~/.ssh/psono-agent.sock` | Unix socket for the background agent |
 | `cache_ttl` | `300` | Key lifetime in seconds; daemon refreshes before expiry |
-| `log_level` | `INFO` | Logging level (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
+| `log_level` | `INFO` | Logging level (`INFO`, `WARNING`, `ERROR`) |
 
 `~/.config/psonoci/*.toml` — one file per Psono account:
 
@@ -95,53 +121,40 @@ api_secret_key_hex = "xxxx...64 hex chars...xxxx"
 server_url         = "https://your-psono-server/"
 
 [http_options]
-timeout                          = 60
-max_redirects                    = 0
-use_native_tls                   = false
-danger_disable_tls_verification  = false
+timeout                         = 60
+max_redirects                   = 0
+use_native_tls                  = false
+danger_disable_tls_verification = false
 ```
 
 The Psono API key must have **read access** to all SSH key secrets you want to use. `restrict_to_secrets` can be set to only expose SSH keys to this API key.
 
 ## Installation
 
-### Dependencies
+Run the interactive setup script:
 
 ```bash
-# psonoci
-curl -L https://github.com/meldron/psonoci/releases/latest/download/psonoci-linux-x86_64 \
-  -o ~/.local/bin/psonoci && chmod +x ~/.local/bin/psonoci
-
-# Python cryptography library (for psonoci ssh add)
-pip install cryptography
+git clone git@github.com:thematrixdev/ssh-with-psonoci.git
+cd ssh-with-psonoci
+bash setup.sh
 ```
 
-### Setup
+The script will guide you through:
 
-```bash
-# 1. Create config directory
-mkdir -p ~/.config/psono-agent ~/.config/psonoci
+1. Checking and installing dependencies (psonoci auto-downloaded if missing)
+2. Adding one or more Psono accounts — credentials are tested before saving
+3. Writing `~/.config/psono-agent/config.json`
+4. Installing scripts to `~/.local/bin/` with correct permissions
+5. Checking PATH order and optionally updating `.bashrc` / `.zshrc`
+6. Enabling the systemd user service
+7. Optionally updating `~/.ssh/config` with the fallback `IdentityAgent`
+8. Verifying the agent is running and keys are loaded
 
-# 2. Place config files (see Configuration above)
-
-# 3. Make scripts executable
-chmod +x ~/.local/bin/psono-ssh-agent.py ~/.local/bin/ssh
-
-# 4. Ensure ~/.local/bin is before /usr/bin in PATH
-#    Add to ~/.bashrc or ~/.zshrc if not already present:
-#    export PATH="$HOME/.local/bin:$PATH"
-
-# 5. Enable and start the background daemon
-systemctl --user daemon-reload
-systemctl --user enable --now psono-ssh-agent
-
-# 6. Verify keys are loaded
-SSH_AUTH_SOCK=~/.ssh/psono-agent.sock ssh-add -l
-```
+The script is safe to re-run — existing files prompt before overwriting, and existing accounts are preserved unless explicitly replaced.
 
 ### `~/.ssh/config`
 
-Add a global `IdentityAgent` as fallback for hosts not managed by Psono:
+The setup script can add this automatically, or add it manually:
 
 ```sshconfig
 Host *

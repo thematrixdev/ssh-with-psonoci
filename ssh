@@ -1,127 +1,129 @@
-#!/usr/bin/env python3
-"""psono-ssh — SSH wrapper that loads the matching Psono key per host.
+#!/usr/bin/env bash
+# psono-ssh — SSH wrapper that loads the matching Psono key per host
+#
+# Lookup:  Psono secret title  → SSH Host alias
+#          Psono secret notes  → SSH config directives (HostName, Port, User, etc.)
+#
+# Matched: starts a single-key temp agent, passes notes as -o options
+# No match: passes through to /usr/bin/ssh unchanged
 
-Lookup:  Psono secret title  → SSH Host alias
-         Psono secret notes  → SSH HostName (actual IP / hostname)
-
-Matched: starts a single-key temp agent, overrides IdentityAgent
-No match: passes through to /usr/bin/ssh unchanged
-"""
-
-import json
-import os
-import signal
-import subprocess
-import sys
-from pathlib import Path
-
-SSH_BIN    = "/usr/bin/ssh"
-CONFIG     = Path("~/.config/psono-agent/config.json").expanduser()
+SSH_BIN="/usr/bin/ssh"
+CONFIG="$HOME/.config/psono-agent/config.json"
 
 # SSH options that consume the next argument
-OPTS_WITH_ARG = set("bcDeFIiJLlmopQRSwW")
+OPTS_WITH_ARG="bcDeFIiJLlmopQRSwW"
 
+expand_path() { echo "${1/#\~/$HOME}"; }
 
-def find_host_arg(args: list[str]) -> tuple[int | None, str, str | None]:
-    """Return (index, user_prefix, host) of the destination argument."""
-    skip = False
-    for i, arg in enumerate(args):
-        if skip:
-            skip = False
+# Sets HOST_ALIAS from "$@"
+find_host_alias() {
+    HOST_ALIAS=""
+    local skip_next=0
+
+    for arg in "$@"; do
+        if [[ $skip_next -eq 1 ]]; then
+            skip_next=0
             continue
-        if arg == "--":
-            break
-        if arg.startswith("-") and len(arg) == 2 and arg[1] in OPTS_WITH_ARG:
-            skip = True
+        fi
+        [[ "$arg" == "--" ]] && break
+        if [[ "$arg" =~ ^-[${OPTS_WITH_ARG}]$ ]]; then
+            skip_next=1
             continue
-        if arg.startswith("-"):
+        fi
+        if [[ "$arg" =~ ^- ]]; then
             continue
-        if "@" in arg:
-            user, host = arg.split("@", 1)
-            return i, user + "@", host
-        return i, "", arg
-    return None, "", None
+        fi
+        # First non-option argument is the destination; strip user@ prefix
+        if [[ "$arg" == *@* ]]; then
+            HOST_ALIAS="${arg##*@}"
+        else
+            HOST_ALIAS="$arg"
+        fi
+        return
+    done
+}
 
+# Sets FOUND_CFG, FOUND_ID, FOUND_NOTES; returns 0 on match
+find_secret() {
+    local host="$1"
+    local num_accounts
+    num_accounts=$(jq '.accounts | length' "$CONFIG")
 
-def find_secret(accounts: list, host: str) -> tuple[str, str, str | None] | None:
-    """Return (psono_cfg, secret_id, hostname) where title matches host."""
-    for account in accounts:
-        psono_cfg = str(Path(account["psono_config"]).expanduser())
-        try:
-            r = subprocess.run(
-                ["psonoci", "-c", psono_cfg, "api-key", "secrets"],
-                capture_output=True, text=True, check=True,
-            )
-            secrets = json.loads(r.stdout)
-        except Exception:
-            continue
-        for secret_id, data in secrets.items():
-            if data.get("title") == host:
-                hostname = (data.get("notes") or "").strip() or None
-                return psono_cfg, secret_id, hostname
-    return None
+    for i in $(seq 0 $((num_accounts - 1))); do
+        local psono_cfg secrets secret_id
+        psono_cfg=$(expand_path "$(jq -r ".accounts[$i].psono_config" "$CONFIG")")
 
+        secrets=$(psonoci -c "$psono_cfg" api-key secrets 2>/dev/null) || continue
 
-def start_agent(sock_path: str) -> int | None:
-    """Start ssh-agent on sock_path, return its PID or None."""
-    r = subprocess.run(
-        ["ssh-agent", "-a", sock_path],
-        capture_output=True, text=True,
-    )
-    for line in r.stdout.splitlines():
-        if "SSH_AGENT_PID=" in line:
-            return int(line.split("SSH_AGENT_PID=")[1].split(";")[0])
-    return None
+        secret_id=$(echo "$secrets" | jq -r --arg h "$host" \
+            'to_entries[] | select(.value.title == $h) | .key' | head -1)
 
+        if [[ -n "$secret_id" ]]; then
+            FOUND_CFG="$psono_cfg"
+            FOUND_ID="$secret_id"
+            FOUND_NOTES=$(echo "$secrets" | jq -r --arg id "$secret_id" \
+                '.[$id].notes // ""')
+            return 0
+        fi
+    done
+    return 1
+}
 
-def main() -> int:
-    args = list(sys.argv[1:])
+# Parses notes (ssh_config format) into SSH_OPTS array of -o arguments
+parse_notes() {
+    local notes="$1"
+    SSH_OPTS=()
+    [[ -z "$notes" ]] && return
 
-    # Load config; if unavailable just exec real ssh
-    try:
-        with open(CONFIG) as f:
-            cfg = json.load(f)
-    except Exception:
-        os.execv(SSH_BIN, [SSH_BIN] + args)
+    while IFS= read -r line; do
+        # Trim leading/trailing whitespace
+        line="${line#"${line%%[![:space:]]*}"}"
+        line="${line%"${line##*[![:space:]]}"}"
+        # Skip empty lines, comments, and lines without a key-value pair
+        [[ -z "$line" || "$line" == \#* || "$line" != *" "* ]] && continue
+        # Extract key (first word) and value (rest)
+        local key="${line%% *}"
+        local value="${line#* }"
+        SSH_OPTS+=(-o "$key=$value")
+    done <<< "$notes"
+}
 
-    idx, user_prefix, host = find_host_arg(args)
-    match = find_secret(cfg["accounts"], host) if host else None
+main() {
+    [[ ! -f "$CONFIG" ]] && exec "$SSH_BIN" "$@"
 
-    sock_path = f"/tmp/psono-ssh-{os.getpid()}.sock"
-    agent_pid = None
+    find_host_alias "$@"
+    [[ -z "$HOST_ALIAS" ]] && exec "$SSH_BIN" "$@"
 
-    if match:
-        psono_cfg, secret_id, hostname = match
+    local sock_path="/tmp/psono-ssh-$$.sock"
+    local agent_pid=""
+    local FOUND_CFG="" FOUND_ID="" FOUND_NOTES=""
 
-        # Replace Host alias with actual HostName from notes
-        if hostname and idx is not None:
-            args[idx] = user_prefix + hostname
+    if find_secret "$HOST_ALIAS"; then
+        parse_notes "$FOUND_NOTES"
 
-        agent_pid = start_agent(sock_path)
-        if agent_pid:
-            subprocess.run(
-                ["psonoci", "-c", psono_cfg, "ssh", "add", secret_id,
-                 "--ssh-auth-sock-path", sock_path],
-                capture_output=True,
-            )
+        # Start temp agent with just this one key
+        eval "$(ssh-agent -a "$sock_path" 2>/dev/null)" >/dev/null
+        agent_pid="$SSH_AGENT_PID"
 
-    # Build final ssh command
-    if agent_pid:
-        # Override any IdentityAgent in ~/.ssh/config with our single-key agent
-        final_args = [SSH_BIN, "-o", f"IdentityAgent={sock_path}"] + args
-    else:
-        final_args = [SSH_BIN] + args
+        if [[ -n "$agent_pid" ]]; then
+            psonoci -c "$FOUND_CFG" ssh add "$FOUND_ID" \
+                --ssh-auth-sock-path "$sock_path" >/dev/null 2>&1 || true
+        fi
+    fi
 
-    try:
-        return subprocess.run(final_args).returncode
-    finally:
-        if agent_pid:
-            try:
-                os.kill(agent_pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-            Path(sock_path).unlink(missing_ok=True)
+    local ret=0
+    if [[ -n "$agent_pid" ]]; then
+        # Notes options first, then user args; direct flags (-p, -l) override -o
+        "$SSH_BIN" -o "IdentityAgent=$sock_path" "${SSH_OPTS[@]}" "$@"
+        ret=$?
+        kill "$agent_pid" 2>/dev/null || true
+        rm -f "$sock_path"
+    else
+        "$SSH_BIN" "$@"
+        ret=$?
+    fi
 
+    return $ret
+}
 
-if __name__ == "__main__":
-    sys.exit(main())
+main "$@"
