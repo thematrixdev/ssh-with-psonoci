@@ -1,0 +1,12 @@
+[Unit]
+Description=Psono SSH Agent
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 %h/.local/bin/psono-ssh-agent.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

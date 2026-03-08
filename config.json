@@ -1,0 +1,9 @@
+{
+  "accounts": [
+    {"name": "personal", "psono_config": "~/.config/psonoci/personal.toml"},
+    {"name": "work",     "psono_config": "~/.config/psonoci/work.toml"}
+  ],
+  "socket_path": "~/.ssh/psono-agent.sock",
+  "cache_ttl": 300,
+  "log_level": "INFO"
+}

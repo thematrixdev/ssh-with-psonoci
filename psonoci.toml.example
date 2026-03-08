@@ -1,0 +1,12 @@
+version = "1"
+
+[psono_settings]
+api_key_id         = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+api_secret_key_hex = "xxxx...64 hex chars...xxxx"
+server_url         = "https://your-psono-server/"
+
+[http_options]
+timeout                         = 60
+max_redirects                   = 0
+use_native_tls                  = false
+danger_disable_tls_verification = false
