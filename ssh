@@ -13,6 +13,8 @@ CONFIG="$HOME/.config/psono-agent/config.json"
 CACHE_DIR="$HOME/.cache/psono-agent"
 CACHE_FILE="$CACHE_DIR/secrets.json"
 DAEMON_SOCK=$(cat "$CACHE_DIR/socket_path" 2>/dev/null || true)
+DAEMON_PID_FILE="$CACHE_DIR/daemon.pid"
+CACHE_HIT=0
 
 # SSH options that consume the next argument
 OPTS_WITH_ARG="bcDeFIiJLlmopQRSwW"
@@ -61,6 +63,7 @@ find_secret() {
             FOUND_CFG="${FOUND_CFG/#\~/$HOME}"
             FOUND_ID=$(echo "$entry" | jq -r '.secret_id')
             FOUND_NOTES=$(echo "$entry" | jq -r '.notes')
+            CACHE_HIT=1
             return 0
         fi
     fi
@@ -145,11 +148,11 @@ main() {
     local sock_path=""
     local agent_pid=""
 
-    if [[ -n "$DAEMON_SOCK" && -S "$DAEMON_SOCK" ]]; then
-        # Persistent Psono agent is running
+    if [[ $CACHE_HIT -eq 1 && -n "$DAEMON_SOCK" && -S "$DAEMON_SOCK" ]]; then
+        # Cache hit + persistent Psono agent is running — key is loaded
         sock_path="$DAEMON_SOCK"
     else
-        # No daemon; fall back to a temp single-key agent
+        # Cache miss or no daemon; use a temp single-key agent
         sock_path="/tmp/psono-ssh-$$.sock"
         key_opts=()  # not needed — temp agent has only one key
         eval "$(ssh-agent -a "$sock_path" 2>/dev/null)" >/dev/null
@@ -158,6 +161,15 @@ main() {
         if [[ -n "$agent_pid" ]]; then
             psonoci -c "$FOUND_CFG" ssh add "$FOUND_ID" \
                 --ssh-auth-sock-path "$sock_path" >/dev/null 2>&1 || true
+        fi
+
+        # Signal daemon to reload so future calls use cache
+        if [[ $CACHE_HIT -eq 0 && -f "$DAEMON_PID_FILE" ]]; then
+            local dpid
+            dpid=$(cat "$DAEMON_PID_FILE" 2>/dev/null)
+            if [[ -n "$dpid" ]] && kill -0 "$dpid" 2>/dev/null; then
+                kill -HUP "$dpid" 2>/dev/null || true
+            fi
         fi
     fi
 

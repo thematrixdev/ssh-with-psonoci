@@ -31,6 +31,11 @@ cleanup() {
 }
 trap cleanup SIGTERM SIGINT
 
+# SIGHUP triggers immediate reload (used by ssh wrapper on cache miss)
+RELOAD_REQUESTED=0
+request_reload() { RELOAD_REQUESTED=1; }
+trap request_reload SIGHUP
+
 load_keys() {
     local count=0
     local num_accounts
@@ -83,8 +88,20 @@ load_keys() {
     log INFO "Total: $count key(s) loaded, cache written"
 }
 
+## Write PID file for ssh wrapper to signal reload
+echo $$ > "$CACHE_DIR/daemon.pid"
+
 while true; do
     log INFO "Loading keys from Psono..."
     load_keys
-    sleep "$REFRESH_INTERVAL"
+    RELOAD_REQUESTED=0
+    # Sleep in short intervals to respond to SIGHUP promptly
+    local_elapsed=0
+    while [[ $local_elapsed -lt $REFRESH_INTERVAL && $RELOAD_REQUESTED -eq 0 ]]; do
+        sleep 1
+        local_elapsed=$((local_elapsed + 1))
+    done
+    if [[ $RELOAD_REQUESTED -eq 1 ]]; then
+        log INFO "Reload requested via SIGHUP"
+    fi
 done
