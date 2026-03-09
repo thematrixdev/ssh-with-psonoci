@@ -68,7 +68,7 @@ else
             aarch64) PSONOCI_ARCH="aarch64" ;;
             *)        err "Unsupported architecture: $ARCH"; exit 1 ;;
         esac
-        URL="https://github.com/meldron/psonoci/releases/latest/download/psonoci-linux-${PSONOCI_ARCH}"
+        URL="https://get.psono.com/psono/psono-ci/${PSONOCI_ARCH}-linux/psonoci"
         if curl -fsSL "$URL" -o "$BIN_DIR/psonoci" && chmod +x "$BIN_DIR/psonoci"; then
             ok "psonoci installed to $BIN_DIR/psonoci"
         else
@@ -122,8 +122,9 @@ add_account() {
         accounts_json=$(echo "$accounts_json" | jq --arg n "$acc_name" '[.[] | select(.name != $n)]')
     fi
 
-    ask "Psono server URL (e.g. https://www.psono.pw/server):"
+    ask "Psono server URL [https://www.psono.pw/server]:"
     read -r server_url
+    server_url="${server_url:-https://www.psono.pw/server}"
     server_url="${server_url%/}/"   # ensure trailing slash
 
     ask "API key ID (UUID):"
