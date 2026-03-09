@@ -14,7 +14,8 @@ Manages a real `ssh-agent` process loaded with all SSH keys from configured Pson
 
 - Starts `ssh-agent` bound to a fixed socket (`~/.ssh/psono-agent.sock`)
 - Fetches all SSH key secrets from each Psono account via `psonoci ssh add`
-- Keys are loaded with `--key-lifetime` so they auto-expire; daemon re-adds them before expiry
+- Writes a local cache (`~/.cache/psono-agent/`) with secrets metadata and public keys for fast wrapper lookups
+- Refreshes keys and cache on a configurable interval (`refresh_interval`, default 60s)
 - Runs as a systemd user service
 
 ### 2. `ssh` — SSH Wrapper
@@ -24,15 +25,17 @@ Intercepts every `ssh` invocation to load only the relevant key for the target h
 ```
 ssh dev-server
   │
-  ├─ lookup Psono: title = "dev-server"
+  ├─ lookup cache: title = "dev-server"  (instant, from ~/.cache/psono-agent/secrets.json)
   ├─ parse notes → -o HostName=10.0.0.5 -o Port=2222 -o User=ubuntu
-  ├─ start temp ssh-agent (/tmp/psono-ssh-PID.sock)
-  ├─ psonoci ssh add <secret_id>  ← only this one key
-  ├─ /usr/bin/ssh -o IdentityAgent=... -o HostName=... -o Port=... -o User=... dev-server
-  └─ cleanup: kill temp agent, delete socket
+  ├─ resolve cached public key → IdentitiesOnly=yes + IdentityFile=<cached .pub>
+  ├─ /usr/bin/ssh -o IdentityAgent=~/.ssh/psono-agent.sock -o IdentitiesOnly=yes \
+  │    -o IdentityFile=<cached .pub> -o HostName=... -o Port=... -o User=... dev-server
+  └─ (falls back to temp single-key agent if daemon is not running)
 ```
 
 The destination server sees only **one** public key probe, not all keys in the agent.
+
+For `ssh -G` queries (used by IDEs like JetBrains IDEA), the wrapper injects notes and key options without starting an agent, responding instantly from cache.
 
 If no Psono secret matches the host, the wrapper passes through to `/usr/bin/ssh` unchanged.
 
@@ -86,6 +89,9 @@ Multiple Psono accounts are supported. The wrapper searches all accounts in orde
 | `~/.config/systemd/user/psono-ssh-agent.service` | Systemd unit |
 | `~/.config/psonoci/personal.toml` | Psono credentials (personal) |
 | `~/.config/psonoci/work.toml` | Psono credentials (work) |
+| `~/.cache/psono-agent/secrets.json` | Cached secrets metadata (auto-generated) |
+| `~/.cache/psono-agent/*.pub` | Cached public keys (auto-generated) |
+| `~/.config/environment.d/ssh-auth-sock.conf` | Sets SSH_AUTH_SOCK for desktop apps |
 
 ## Configuration
 
@@ -98,7 +104,7 @@ Multiple Psono accounts are supported. The wrapper searches all accounts in orde
     {"name": "work",     "psono_config": "~/.config/psonoci/work.toml"}
   ],
   "socket_path": "~/.ssh/psono-agent.sock",
-  "cache_ttl": 300,
+  "refresh_interval": 60,
   "log_level": "INFO"
 }
 ```
@@ -107,7 +113,7 @@ Multiple Psono accounts are supported. The wrapper searches all accounts in orde
 |-----|---------|-------------|
 | `accounts` | — | List of Psono accounts with their `psonoci` config paths |
 | `socket_path` | `~/.ssh/psono-agent.sock` | Unix socket for the background agent |
-| `cache_ttl` | `300` | Key lifetime in seconds; daemon refreshes before expiry |
+| `refresh_interval` | `60` | Seconds between daemon key refresh cycles |
 | `log_level` | `INFO` | Logging level (`INFO`, `WARNING`, `ERROR`) |
 
 `~/.config/psonoci/*.toml` — one file per Psono account:
@@ -147,8 +153,9 @@ The script will guide you through:
 4. Installing scripts to `~/.local/bin/` with correct permissions
 5. Checking PATH order and optionally updating `.bashrc` / `.zshrc`
 6. Enabling the systemd user service
-7. Optionally updating `~/.ssh/config` with the fallback `IdentityAgent`
-8. Verifying the agent is running and keys are loaded
+7. Configuring `SSH_AUTH_SOCK` via `environment.d` and optionally disabling GNOME Keyring SSH agent
+8. Optionally updating `~/.ssh/config` with `IdentityAgent` and `IdentitiesOnly`
+9. Verifying the agent is running and keys are loaded
 
 The script is safe to re-run — existing files prompt before overwriting, and existing accounts are preserved unless explicitly replaced.
 
@@ -159,16 +166,17 @@ The setup script can add this automatically, or add it manually:
 ```sshconfig
 Host *
     IdentityAgent ~/.ssh/psono-agent.sock
+    IdentitiesOnly yes
 ```
 
-The SSH wrapper overrides this with a single-key temp agent for matched hosts.
+`IdentitiesOnly yes` prevents SSH from trying all agent keys — only keys explicitly specified via `-i` or the wrapper's `-o IdentityFile` are used, avoiding "Too many authentication failures" errors.
 
 ## Security Properties
 
-- **Private keys never written to disk** — loaded into agent memory only
-- **Per-connection key isolation** — temp agent holds exactly one key per SSH session
+- **Private keys never written to disk** — loaded into agent memory only; cached public keys (`.pub`) contain no sensitive material
+- **Single-key authentication** — `IdentitiesOnly` + `IdentityFile` ensures only the matching key is offered per connection
 - **Destination server sees one key probe** — no fingerprint leakage of unrelated keys
-- **Keys auto-expire** — `--key-lifetime` ensures no long-lived key material in memory
+- **Cache files protected** — `~/.cache/psono-agent/` is `chmod 700`, all files `chmod 600`
 - **Psono credentials protected** — `psonoci` config files are `chmod 600`
 
 ## Troubleshooting
