@@ -10,8 +10,11 @@ log() { echo "$(date '+%Y-%m-%d %H:%M:%S') [$1] $2"; }
 expand_path() { echo "${1/#\~/$HOME}"; }
 
 SOCKET_PATH=$(expand_path "$(jq -r '.socket_path' "$CONFIG")")
-CACHE_TTL=$(jq -r '.cache_ttl // 300' "$CONFIG")
-REFRESH_INTERVAL=$(( CACHE_TTL > 30 ? CACHE_TTL - 30 : 30 ))
+CACHE_DIR="$HOME/.cache/psono-agent"
+REFRESH_INTERVAL=$(jq -r '.refresh_interval // 300' "$CONFIG")
+
+mkdir -p "$CACHE_DIR"
+chmod 700 "$CACHE_DIR"
 
 # Remove stale socket
 rm -f "$SOCKET_PATH"
@@ -31,6 +34,7 @@ trap cleanup SIGTERM SIGINT
 load_keys() {
     local count=0
     local num_accounts
+    local cache_obj='{}'
     num_accounts=$(jq '.accounts | length' "$CONFIG")
 
     for i in $(seq 0 $((num_accounts - 1))); do
@@ -43,22 +47,40 @@ load_keys() {
             continue
         fi
 
+        # Build cache: title → { notes, secret_id, psono_config }
+        cache_obj=$(echo "$secrets" | jq --arg cfg "$psono_cfg" --argjson existing "$cache_obj" '
+            reduce to_entries[] as $e ($existing;
+                .[$e.value.title] = {
+                    notes: ($e.value.notes // ""),
+                    secret_id: $e.key,
+                    psono_config: $cfg
+                }
+            )
+        ')
+
         while IFS= read -r secret_id; do
             local title
             title=$(echo "$secrets" | jq -r ".\"$secret_id\".title // \"${secret_id:0:8}\"")
 
             if psonoci -c "$psono_cfg" ssh add "$secret_id" \
-                --ssh-auth-sock-path "$SOCKET_PATH" \
-                --key-lifetime "$CACHE_TTL" >/dev/null 2>&1; then
+                --ssh-auth-sock-path "$SOCKET_PATH" >/dev/null 2>&1; then
                 log INFO "Loaded [$name] $title"
                 count=$((count + 1))
+
+                # Cache public key for IdentityFile matching
+                ( umask 077 && psonoci -c "$psono_cfg" secret get "$secret_id" ssh_key_public \
+                    > "$CACHE_DIR/$secret_id.pub" 2>/dev/null ) || true
             else
                 log ERROR "Failed to load [$name] $title"
             fi
         done < <(echo "$secrets" | jq -r 'keys[]')
     done
 
-    log INFO "Total: $count key(s) loaded"
+    # Write cache atomically (owner-only)
+    ( umask 077 && echo "$cache_obj" > "$CACHE_DIR/secrets.json.tmp" )
+    mv -f "$CACHE_DIR/secrets.json.tmp" "$CACHE_DIR/secrets.json"
+    ( umask 077 && echo "$SOCKET_PATH" > "$CACHE_DIR/socket_path" )
+    log INFO "Total: $count key(s) loaded, cache written"
 }
 
 while true; do

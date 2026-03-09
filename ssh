@@ -4,11 +4,15 @@
 # Lookup:  Psono secret title  → SSH Host alias
 #          Psono secret notes  → SSH config directives (HostName, Port, User, etc.)
 #
-# Matched: starts a single-key temp agent, passes notes as -o options
+# Matched: uses the persistent Psono agent if available, otherwise
+#          starts a single-key temp agent; passes notes as -o options
 # No match: passes through to /usr/bin/ssh unchanged
 
 SSH_BIN="/usr/bin/ssh"
 CONFIG="$HOME/.config/psono-agent/config.json"
+CACHE_DIR="$HOME/.cache/psono-agent"
+CACHE_FILE="$CACHE_DIR/secrets.json"
+DAEMON_SOCK=$(cat "$CACHE_DIR/socket_path" 2>/dev/null || true)
 
 # SSH options that consume the next argument
 OPTS_WITH_ARG="bcDeFIiJLlmopQRSwW"
@@ -44,8 +48,24 @@ find_host_alias() {
 }
 
 # Sets FOUND_CFG, FOUND_ID, FOUND_NOTES; returns 0 on match
+# Tries local cache first, falls back to API
 find_secret() {
     local host="$1"
+
+    # Try cache (instant)
+    if [[ -f "$CACHE_FILE" ]]; then
+        local entry
+        entry=$(jq -r --arg h "$host" '.[$h] // empty' "$CACHE_FILE" 2>/dev/null)
+        if [[ -n "$entry" ]]; then
+            FOUND_CFG=$(echo "$entry" | jq -r '.psono_config')
+            FOUND_CFG="${FOUND_CFG/#\~/$HOME}"
+            FOUND_ID=$(echo "$entry" | jq -r '.secret_id')
+            FOUND_NOTES=$(echo "$entry" | jq -r '.notes')
+            return 0
+        fi
+    fi
+
+    # Cache miss — call API
     local num_accounts
     num_accounts=$(jq '.accounts | length' "$CONFIG")
 
@@ -91,17 +111,47 @@ parse_notes() {
 main() {
     [[ ! -f "$CONFIG" ]] && exec "$SSH_BIN" "$@"
 
+    # Pass through version/query operations immediately
+    for arg in "$@"; do
+        [[ "$arg" == "-V" || "$arg" == "-Q" ]] && exec "$SSH_BIN" "$@"
+    done
+
     find_host_alias "$@"
     [[ -z "$HOST_ALIAS" ]] && exec "$SSH_BIN" "$@"
 
-    local sock_path="/tmp/psono-ssh-$$.sock"
-    local agent_pid=""
     local FOUND_CFG="" FOUND_ID="" FOUND_NOTES=""
 
-    if find_secret "$HOST_ALIAS"; then
-        parse_notes "$FOUND_NOTES"
+    if ! find_secret "$HOST_ALIAS"; then
+        exec "$SSH_BIN" "$@"
+    fi
 
-        # Start temp agent with just this one key
+    parse_notes "$FOUND_NOTES"
+
+    # Resolve cached public key (written by psono-ssh-agent daemon)
+    local cached_pubkey="$CACHE_DIR/$FOUND_ID.pub"
+    local key_opts=()
+    if [[ -n "$DAEMON_SOCK" && -S "$DAEMON_SOCK" && -s "$cached_pubkey" ]]; then
+        key_opts=(-o "IdentitiesOnly=yes" -o "IdentityFile=$cached_pubkey")
+    fi
+
+    # For config queries (ssh -G), inject options and return immediately
+    for arg in "$@"; do
+        if [[ "$arg" == "-G" ]]; then
+            exec "$SSH_BIN" "${key_opts[@]}" "${SSH_OPTS[@]}" "$@"
+        fi
+    done
+
+    # Prepare agent for actual connections
+    local sock_path=""
+    local agent_pid=""
+
+    if [[ -n "$DAEMON_SOCK" && -S "$DAEMON_SOCK" ]]; then
+        # Persistent Psono agent is running
+        sock_path="$DAEMON_SOCK"
+    else
+        # No daemon; fall back to a temp single-key agent
+        sock_path="/tmp/psono-ssh-$$.sock"
+        key_opts=()  # not needed — temp agent has only one key
         eval "$(ssh-agent -a "$sock_path" 2>/dev/null)" >/dev/null
         agent_pid="$SSH_AGENT_PID"
 
@@ -111,16 +161,12 @@ main() {
         fi
     fi
 
-    local ret=0
+    # Notes options first, then user args; direct flags (-p, -l) override -o
+    "$SSH_BIN" -o "IdentityAgent=$sock_path" "${key_opts[@]}" "${SSH_OPTS[@]}" "$@"
+    local ret=$?
     if [[ -n "$agent_pid" ]]; then
-        # Notes options first, then user args; direct flags (-p, -l) override -o
-        "$SSH_BIN" -o "IdentityAgent=$sock_path" "${SSH_OPTS[@]}" "$@"
-        ret=$?
         kill "$agent_pid" 2>/dev/null || true
         rm -f "$sock_path"
-    else
-        "$SSH_BIN" "$@"
-        ret=$?
     fi
 
     return $ret

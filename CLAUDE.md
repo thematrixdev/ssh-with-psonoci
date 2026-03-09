@@ -6,9 +6,9 @@ SSH key management backed by Psono. Private keys stay in Psono, never on disk.
 
 Two components:
 
-1. **`psono-ssh-agent.sh`** — systemd daemon that runs a real `ssh-agent` loaded with all Psono SSH keys. Keys auto-expire via `--key-lifetime`; daemon refreshes before expiry.
+1. **`psono-ssh-agent.sh`** — systemd daemon that runs a real `ssh-agent` loaded with all Psono SSH keys. Refreshes keys on a configurable interval (`refresh_interval`). Writes a local cache (`~/.cache/psono-agent/`) of secrets metadata and public keys for fast wrapper lookups.
 
-2. **`ssh`** (wrapper) — intercepts `ssh` invocations, matches host alias against Psono secret `title`, parses `notes` as ssh_config directives (`HostName`, `Port`, `User`, `ProxyCommand`, etc.), starts a temp single-key agent per connection. Falls through to `/usr/bin/ssh` if no match.
+2. **`ssh`** (wrapper) — intercepts `ssh` invocations, matches host alias against Psono secret `title` (via local cache, falling back to API), parses `notes` as ssh_config directives (`HostName`, `Port`, `User`, `ProxyCommand`, etc.). Uses the persistent daemon agent with single-key restriction (`IdentitiesOnly`); falls back to a temp agent if the daemon is not running. Falls through to `/usr/bin/ssh` if no match.
 
 ## Key Files
 

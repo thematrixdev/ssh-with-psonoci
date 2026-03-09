@@ -204,21 +204,22 @@ fi
 section "Writing config.json"
 
 # Preserve existing non-account settings if config exists
-cache_ttl=300
+refresh_interval=300
 log_level="INFO"
 if [[ -f "$CONFIG_DIR/config.json" ]]; then
-    cache_ttl=$(jq -r '.cache_ttl // 300' "$CONFIG_DIR/config.json")
+    # Support legacy cache_ttl field from older configs
+    refresh_interval=$(jq -r '.refresh_interval // .cache_ttl // 300' "$CONFIG_DIR/config.json")
     log_level=$(jq -r '.log_level // "INFO"' "$CONFIG_DIR/config.json")
 fi
 
 jq -n \
     --argjson accounts "$accounts_json" \
-    --argjson cache_ttl "$cache_ttl" \
+    --argjson refresh_interval "$refresh_interval" \
     --arg log_level "$log_level" \
     '{
         accounts:    $accounts,
         socket_path: "~/.ssh/psono-agent.sock",
-        cache_ttl:   $cache_ttl,
+        refresh_interval:   $refresh_interval,
         log_level:   $log_level
     }' > "$CONFIG_DIR/config.json"
 ok "$CONFIG_DIR/config.json"
@@ -302,7 +303,40 @@ else
     ok "psono-ssh-agent.service enabled and started"
 fi
 
-# ── 8. ~/.ssh/config ──────────────────────────────────────────────────────────
+# ── 8. SSH_AUTH_SOCK environment ───────────────────────────────────────────
+
+section "SSH_AUTH_SOCK environment"
+
+ENV_D_DIR="$HOME/.config/environment.d"
+ENV_D_FILE="$ENV_D_DIR/ssh-auth-sock.conf"
+
+mkdir -p "$ENV_D_DIR"
+
+if [[ -f "$ENV_D_FILE" ]] && grep -q "psono-agent" "$ENV_D_FILE" 2>/dev/null; then
+    ok "$ENV_D_FILE already configured"
+else
+    echo "SSH_AUTH_SOCK=$AGENT_SOCK" > "$ENV_D_FILE"
+    ok "$ENV_D_FILE created"
+fi
+
+# Disable GCR SSH agent if active (it overrides SSH_AUTH_SOCK)
+if systemctl --user is-active gcr-ssh-agent.socket &>/dev/null; then
+    warn "gcr-ssh-agent (GNOME Keyring SSH) is active and overrides SSH_AUTH_SOCK"
+    if confirm "  Disable gcr-ssh-agent so Psono agent is used instead?"; then
+        systemctl --user mask gcr-ssh-agent.socket gcr-ssh-agent.service &>/dev/null
+        ok "gcr-ssh-agent masked"
+    fi
+elif systemctl --user is-enabled gcr-ssh-agent.socket &>/dev/null 2>&1; then
+    warn "gcr-ssh-agent is enabled (may override SSH_AUTH_SOCK on next login)"
+    if confirm "  Disable gcr-ssh-agent so Psono agent is used instead?"; then
+        systemctl --user mask gcr-ssh-agent.socket gcr-ssh-agent.service &>/dev/null
+        ok "gcr-ssh-agent masked"
+    fi
+else
+    ok "gcr-ssh-agent not active"
+fi
+
+# ── 9. ~/.ssh/config ─────────────────────────────────────────────────────────
 
 section "~/.ssh/config"
 
@@ -320,7 +354,7 @@ else
     fi
 fi
 
-# ── 9. Verification ───────────────────────────────────────────────────────────
+# ── 10. Verification ──────────────────────────────────────────────────────────
 
 section "Verification"
 
