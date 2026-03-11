@@ -16,6 +16,7 @@ Two components:
 |------|---------|
 | `psono-ssh-agent.sh` | Background daemon (→ `~/.local/bin/`) |
 | `ssh` | SSH wrapper (→ `~/.local/bin/`) |
+| `scp` | SCP wrapper, delegates to ssh wrapper via `-S` (→ `~/.local/bin/`) |
 | `config.json` | Account list + agent settings (→ `~/.config/psono-agent/`) |
 | `psono-ssh-agent.service` | Systemd unit (→ `~/.config/systemd/user/`) |
 | `ssh-completion.bash` | Bash completion for ssh wrapper (→ `~/.local/share/bash-completion/completions/ssh`) |

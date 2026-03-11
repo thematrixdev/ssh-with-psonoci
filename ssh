@@ -25,19 +25,25 @@ expand_path() { echo "${1/#\~/$HOME}"; }
 find_host_alias() {
     HOST_ALIAS=""
     local skip_next=0
+    local after_dashdash=0
 
     for arg in "$@"; do
         if [[ $skip_next -eq 1 ]]; then
             skip_next=0
             continue
         fi
-        [[ "$arg" == "--" ]] && break
-        if [[ "$arg" =~ ^-[${OPTS_WITH_ARG}]$ ]]; then
-            skip_next=1
+        if [[ "$arg" == "--" ]]; then
+            after_dashdash=1
             continue
         fi
-        if [[ "$arg" =~ ^- ]]; then
-            continue
+        if [[ $after_dashdash -eq 0 ]]; then
+            if [[ "$arg" =~ ^-[${OPTS_WITH_ARG}]$ ]]; then
+                skip_next=1
+                continue
+            fi
+            if [[ "$arg" =~ ^- ]]; then
+                continue
+            fi
         fi
         # First non-option argument is the destination; strip user@ prefix
         if [[ "$arg" == *@* ]]; then

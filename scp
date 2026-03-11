@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# psono-scp — SCP wrapper that uses the Psono SSH wrapper
+#
+# Passes -S ~/.local/bin/ssh so scp uses the Psono-aware SSH wrapper
+# for host alias resolution and key management.
+
+exec /usr/bin/scp -S "$HOME/.local/bin/ssh" "$@"

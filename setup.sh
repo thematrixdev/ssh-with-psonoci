@@ -250,6 +250,7 @@ install_file() {
 
 install_file "psono-ssh-agent.sh" "$BIN_DIR/psono-ssh-agent.sh" 755
 install_file "ssh"                 "$BIN_DIR/ssh"                755
+install_file "scp"                 "$BIN_DIR/scp"                755
 install_file "psono-ssh-agent.service" "$SYSTEMD_DIR/psono-ssh-agent.service" 644
 
 COMPLETION_DIR="$HOME/.local/share/bash-completion/completions"
