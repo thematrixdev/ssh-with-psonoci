@@ -165,8 +165,19 @@ main() {
         agent_pid="$SSH_AGENT_PID"
 
         if [[ -n "$agent_pid" ]]; then
-            psonoci -c "$FOUND_CFG" ssh add "$FOUND_ID" \
-                --ssh-auth-sock-path "$sock_path" >/dev/null 2>&1 || true
+            if ! psonoci -c "$FOUND_CFG" ssh add "$FOUND_ID" \
+                --ssh-auth-sock-path "$sock_path" >/dev/null 2>&1; then
+                # Fallback: fetch key, ensure trailing newline, load with ssh-add
+                local tmpkey
+                tmpkey=$(mktemp "/tmp/psono-ssh-key-$$.XXXXXX")
+                if psonoci -c "$FOUND_CFG" secret get "$FOUND_ID" ssh_key_private \
+                    > "$tmpkey" 2>/dev/null && [[ -s "$tmpkey" ]]; then
+                    [[ "$(tail -c1 "$tmpkey" | xxd -p)" == "0a" ]] || printf '\n' >> "$tmpkey"
+                    chmod 600 "$tmpkey"
+                    SSH_AUTH_SOCK="$sock_path" ssh-add "$tmpkey" >/dev/null 2>&1 || true
+                fi
+                rm -f "$tmpkey"
+            fi
         fi
 
         # Signal daemon to reload so future calls use cache

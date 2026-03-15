@@ -36,6 +36,21 @@ RELOAD_REQUESTED=0
 request_reload() { RELOAD_REQUESTED=1; }
 trap request_reload SIGHUP
 
+# Fallback: fetch private key via API, ensure trailing newline, load with ssh-add
+ssh_add_fallback() {
+    local cfg="$1" sid="$2"
+    local tmpkey
+    tmpkey=$(mktemp "$CACHE_DIR/.tmpkey.XXXXXX")
+    trap "rm -f '$tmpkey'" RETURN
+
+    psonoci -c "$cfg" secret get "$sid" ssh_key_private > "$tmpkey" 2>/dev/null || return 1
+    # Ensure trailing newline (psonoci may omit it, causing ssh-add to fail)
+    [[ -s "$tmpkey" ]] || return 1
+    [[ "$(tail -c1 "$tmpkey" | xxd -p)" == "0a" ]] || printf '\n' >> "$tmpkey"
+    chmod 600 "$tmpkey"
+    SSH_AUTH_SOCK="$SOCKET_PATH" ssh-add "$tmpkey" >/dev/null 2>&1
+}
+
 load_keys() {
     local count=0
     local num_accounts
@@ -71,13 +86,17 @@ load_keys() {
                 --ssh-auth-sock-path "$SOCKET_PATH" >/dev/null 2>&1; then
                 log INFO "Loaded [$name] $title"
                 count=$((count + 1))
-
-                # Cache public key for IdentityFile matching
-                ( umask 077 && psonoci -c "$psono_cfg" secret get "$secret_id" ssh_key_public \
-                    > "$CACHE_DIR/$secret_id.pub" 2>/dev/null ) || true
+            elif ssh_add_fallback "$psono_cfg" "$secret_id"; then
+                log INFO "Loaded [$name] $title (fallback)"
+                count=$((count + 1))
             else
                 log ERROR "Failed to load [$name] $title"
+                continue
             fi
+
+            # Cache public key for IdentityFile matching
+            ( umask 077 && psonoci -c "$psono_cfg" secret get "$secret_id" ssh_key_public \
+                > "$CACHE_DIR/$secret_id.pub" 2>/dev/null ) || true
         done < <(echo "$secrets" | jq -r 'keys[]')
     done
 
