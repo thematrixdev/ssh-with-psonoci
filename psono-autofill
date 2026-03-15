@@ -1,0 +1,320 @@
+#!/usr/bin/env bash
+# psono-autofill — Fill browser forms with Psono credentials
+#
+# Credentials are NEVER printed to stdout/stderr.
+# Designed to be called by AI assistants without exposing secrets
+# to conversation context, terminal logs, or command history.
+#
+# Known residual risk: credentials briefly appear in /proc/<pid>/cmdline
+# while playwright-cli fill is executing (visible to same-user processes).
+# This is unavoidable without stdin-mode support in playwright-cli.
+# The primary threat model is AI conversation logging and terminal output.
+#
+# Subcommands:
+#   fill    Fill username/password fields via playwright-cli
+#   totp    Fill TOTP code via playwright-cli
+#   get     Print a non-sensitive field (username, url, title only)
+#   list    List secret titles across all accounts
+
+set -euo pipefail
+
+CONFIG="${PSONO_AGENT_CONFIG:-$HOME/.config/psono-agent/config.json}"
+PLAYWRIGHT_BIN="playwright-cli"
+
+# Fields safe to print to stdout (everything else must go through 'fill')
+readonly SAFE_FIELDS=(username url title url_filter)
+
+expand_path() { echo "${1/#\~/$HOME}"; }
+die()  { echo "psono-autofill: error: $*" >&2; exit 1; }
+info() { echo "psono-autofill: $*" >&2; }
+
+# Require that a flag has a following argument
+require_arg() { [[ $# -ge 2 && -n "${2:-}" ]] || die "missing value for $1"; }
+
+# ── Secret lookup ────────────────────────────────────────────────────────────
+
+# Find a secret by keyword (case-insensitive substring match on title).
+# Sets: _FOUND_CFG, _FOUND_ID
+find_secret() {
+    local keyword="$1" account_filter="${2:-}"
+
+    [[ -f "$CONFIG" ]] || die "config not found: $CONFIG"
+
+    local num_accounts
+    num_accounts=$(jq '.accounts | length' "$CONFIG")
+
+    for i in $(seq 0 $((num_accounts - 1))); do
+        local name psono_cfg
+        name=$(jq -r ".accounts[$i].name" "$CONFIG")
+        psono_cfg=$(expand_path "$(jq -r ".accounts[$i].psono_config" "$CONFIG")")
+
+        [[ -n "$account_filter" && "$name" != "$account_filter" ]] && continue
+
+        local secrets secret_id
+        secrets=$(psonoci -c "$psono_cfg" api-key secrets 2>/dev/null) || continue
+
+        secret_id=$(echo "$secrets" | jq -r --arg k "$keyword" \
+            'to_entries[] | select((.value.title // "" | ascii_downcase) | contains($k | ascii_downcase)) | .key' | head -1)
+
+        if [[ -n "$secret_id" ]]; then
+            _FOUND_CFG="$psono_cfg"
+            _FOUND_ID="$secret_id"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+# ── fill ─────────────────────────────────────────────────────────────────────
+
+usage_fill() {
+    cat >&2 <<'EOF'
+Usage: psono-autofill fill -s SESSION -k KEYWORD [OPTIONS]
+
+Fill browser form fields with Psono credentials via playwright-cli.
+Credentials never appear in stdout or conversation context.
+
+Options:
+  -s, --session    Playwright session name (required)
+  -k, --keyword    Search keyword for secret title (required)
+  -u, --username   CSS selector for username field
+  -p, --password   CSS selector for password field
+  --submit         CSS selector for submit button (click after fill)
+  -a, --account    Psono account name (default: search all)
+  -h, --help       Show this help
+
+Example:
+  psono-autofill fill -s outlook -k "Microsoft 365" -u '#email' -p '#password'
+EOF
+    exit 1
+}
+
+cmd_fill() {
+    local session="" keyword="" user_sel="" pass_sel="" submit_sel="" account=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -s|--session)  require_arg "$@"; session="$2"; shift 2 ;;
+            -k|--keyword)  require_arg "$@"; keyword="$2"; shift 2 ;;
+            -u|--username) require_arg "$@"; user_sel="$2"; shift 2 ;;
+            -p|--password) require_arg "$@"; pass_sel="$2"; shift 2 ;;
+            --submit)      require_arg "$@"; submit_sel="$2"; shift 2 ;;
+            -a|--account)  require_arg "$@"; account="$2"; shift 2 ;;
+            -h|--help)     usage_fill ;;
+            *)             die "fill: unknown option: $1" ;;
+        esac
+    done
+
+    [[ -z "$session" ]]  && die "fill: missing --session"
+    [[ -z "$keyword" ]]  && die "fill: missing --keyword"
+    [[ -z "$user_sel" && -z "$pass_sel" ]] && die "fill: need at least --username or --password selector"
+
+    local _FOUND_CFG="" _FOUND_ID=""
+    find_secret "$keyword" "$account" || die "fill: no secret matching '$keyword'"
+    info "found secret (${_FOUND_ID:0:8}...)"
+
+    # Fill username
+    if [[ -n "$user_sel" ]]; then
+        local _u
+        _u=$(psonoci -c "$_FOUND_CFG" secret get "$_FOUND_ID" username 2>/dev/null) || true
+        if [[ -n "$_u" ]]; then
+            if "$PLAYWRIGHT_BIN" -s="$session" fill "$user_sel" "$_u" >/dev/null 2>&1; then
+                info "filled username"
+            else
+                info "failed to fill username (check selector: $user_sel)"
+            fi
+            _u=""
+        else
+            info "no username in secret, skipped"
+        fi
+    fi
+
+    # Fill password
+    if [[ -n "$pass_sel" ]]; then
+        local _p
+        _p=$(psonoci -c "$_FOUND_CFG" secret get "$_FOUND_ID" password 2>/dev/null) || true
+        if [[ -n "$_p" ]]; then
+            if "$PLAYWRIGHT_BIN" -s="$session" fill "$pass_sel" "$_p" >/dev/null 2>&1; then
+                info "filled password"
+            else
+                info "failed to fill password (check selector: $pass_sel)"
+            fi
+            _p=""
+        else
+            info "no password in secret, skipped"
+        fi
+    fi
+
+    # Click submit
+    if [[ -n "$submit_sel" ]]; then
+        if "$PLAYWRIGHT_BIN" -s="$session" click "$submit_sel" >/dev/null 2>&1; then
+            info "clicked submit"
+        else
+            info "failed to click submit (check selector: $submit_sel)"
+        fi
+    fi
+
+    info "done"
+}
+
+# ── totp ─────────────────────────────────────────────────────────────────────
+
+usage_totp() {
+    cat >&2 <<'EOF'
+Usage: psono-autofill totp -s SESSION -k KEYWORD -f SELECTOR
+
+Fill a TOTP code into a browser form field.
+
+Options:
+  -s, --session    Playwright session name (required)
+  -k, --keyword    Search keyword for TOTP secret title (required)
+  -f, --field      CSS selector for the TOTP input field (required)
+  --submit         CSS selector for submit button (click after fill)
+  -a, --account    Psono account name (default: search all)
+  -h, --help       Show this help
+
+Example:
+  psono-autofill totp -s outlook -k "Microsoft TOTP" -f '#otpInput'
+EOF
+    exit 1
+}
+
+cmd_totp() {
+    local session="" keyword="" field_sel="" submit_sel="" account=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -s|--session)  require_arg "$@"; session="$2"; shift 2 ;;
+            -k|--keyword)  require_arg "$@"; keyword="$2"; shift 2 ;;
+            -f|--field)    require_arg "$@"; field_sel="$2"; shift 2 ;;
+            --submit)      require_arg "$@"; submit_sel="$2"; shift 2 ;;
+            -a|--account)  require_arg "$@"; account="$2"; shift 2 ;;
+            -h|--help)     usage_totp ;;
+            *)             die "totp: unknown option: $1" ;;
+        esac
+    done
+
+    [[ -z "$session" ]]  && die "totp: missing --session"
+    [[ -z "$keyword" ]]  && die "totp: missing --keyword"
+    [[ -z "$field_sel" ]] && die "totp: missing --field selector"
+
+    local _FOUND_CFG="" _FOUND_ID=""
+    find_secret "$keyword" "$account" || die "totp: no secret matching '$keyword'"
+
+    local _t
+    _t=$(psonoci -c "$_FOUND_CFG" totp get-token "$_FOUND_ID" 2>/dev/null) || die "totp: failed to get token"
+
+    if "$PLAYWRIGHT_BIN" -s="$session" fill "$field_sel" "$_t" >/dev/null 2>&1; then
+        info "filled TOTP code"
+    else
+        info "failed to fill TOTP (check selector: $field_sel)"
+    fi
+    _t=""
+
+    if [[ -n "$submit_sel" ]]; then
+        if "$PLAYWRIGHT_BIN" -s="$session" click "$submit_sel" >/dev/null 2>&1; then
+            info "clicked submit"
+        fi
+    fi
+
+    info "done"
+}
+
+# ── get ──────────────────────────────────────────────────────────────────────
+
+usage_get() {
+    cat >&2 <<'EOF'
+Usage: psono-autofill get -k KEYWORD FIELD
+
+Print a non-sensitive field value to stdout.
+
+Allowed fields: username, url, title, url_filter
+Sensitive fields (password, notes, etc.) are blocked — use 'fill' instead.
+
+Options:
+  -k, --keyword    Search keyword for secret title (required)
+  -a, --account    Psono account name (default: search all)
+  -h, --help       Show this help
+
+Example:
+  psono-autofill get -k "Microsoft" username
+EOF
+    exit 1
+}
+
+cmd_get() {
+    local keyword="" account="" field=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -k|--keyword) require_arg "$@"; keyword="$2"; shift 2 ;;
+            -a|--account) require_arg "$@"; account="$2"; shift 2 ;;
+            -h|--help)    usage_get ;;
+            -*)           die "get: unknown option: $1" ;;
+            *)            field="$1"; shift ;;
+        esac
+    done
+
+    [[ -z "$keyword" ]] && die "get: missing --keyword"
+    [[ -z "$field" ]]   && die "get: missing field name"
+
+    # Enforce safe-field whitelist
+    local safe=0
+    for f in "${SAFE_FIELDS[@]}"; do
+        [[ "$f" == "$field" ]] && { safe=1; break; }
+    done
+    [[ $safe -eq 0 ]] && die "get: field '$field' is sensitive — use 'fill' to inject it into the browser directly"
+
+    local _FOUND_CFG="" _FOUND_ID=""
+    find_secret "$keyword" "$account" || die "get: no secret matching '$keyword'"
+
+    psonoci -c "$_FOUND_CFG" secret get "$_FOUND_ID" "$field" 2>/dev/null
+}
+
+# ── list ─────────────────────────────────────────────────────────────────────
+
+cmd_list() {
+    [[ -f "$CONFIG" ]] || die "config not found: $CONFIG"
+
+    local num_accounts
+    num_accounts=$(jq '.accounts | length' "$CONFIG")
+
+    for i in $(seq 0 $((num_accounts - 1))); do
+        local name psono_cfg
+        name=$(jq -r ".accounts[$i].name" "$CONFIG")
+        psono_cfg=$(expand_path "$(jq -r ".accounts[$i].psono_config" "$CONFIG")")
+
+        local secrets
+        secrets=$(psonoci -c "$psono_cfg" api-key secrets 2>/dev/null) || continue
+
+        echo "=== $name ==="
+        echo "$secrets" | jq -r 'to_entries[] | "  \(.value.title // "(untitled)")"' | sort
+    done
+}
+
+# ── Main dispatch ────────────────────────────────────────────────────────────
+
+case "${1:-}" in
+    fill)  shift; cmd_fill "$@" ;;
+    totp)  shift; cmd_totp "$@" ;;
+    get)   shift; cmd_get "$@" ;;
+    list)  shift; cmd_list ;;
+    -h|--help|"")
+        cat <<'EOF'
+psono-autofill — Fill browser forms with Psono credentials securely
+
+Usage: psono-autofill <command> [options]
+
+Commands:
+  fill    Fill username/password into browser form via playwright-cli
+  totp    Fill TOTP code into browser form via playwright-cli
+  get     Print a non-sensitive field (username, url, title only)
+  list    List available secret titles
+
+Credentials are never printed to stdout/stderr — only status messages.
+Use 'psono-autofill <command> --help' for command-specific usage.
+EOF
+        ;;
+    *)  die "unknown command: $1 (try: fill, totp, get, list)" ;;
+esac

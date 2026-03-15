@@ -4,11 +4,13 @@ SSH key management backed by Psono. Private keys stay in Psono, never on disk.
 
 ## Architecture
 
-Two components:
+Three components:
 
 1. **`psono-ssh-agent.sh`** — systemd daemon that runs a real `ssh-agent` loaded with all Psono SSH keys. Refreshes keys on a configurable interval (`refresh_interval`). Writes a local cache (`~/.cache/psono-agent/`) of secrets metadata and public keys for fast wrapper lookups.
 
 2. **`ssh`** (wrapper) — intercepts `ssh` invocations, matches host alias against Psono secret `title` (via local cache, falling back to API), parses `notes` as ssh_config directives (`HostName`, `Port`, `User`, `ProxyCommand`, etc.). Uses the persistent daemon agent with single-key restriction (`IdentitiesOnly`); falls back to a temp agent if the daemon is not running. Falls through to `/usr/bin/ssh` if no match.
+
+3. **`psono-autofill`** — browser credential filler. Searches Psono secrets by keyword, retrieves username/password/TOTP internally, and injects them into browser form fields via `playwright-cli`. Credentials never appear in stdout, stderr, or AI conversation context. Also provides a safe `get` subcommand that only allows non-sensitive fields (username, url, title).
 
 ## Key Files
 
@@ -17,6 +19,7 @@ Two components:
 | `psono-ssh-agent.sh` | Background daemon (→ `~/.local/bin/`) |
 | `ssh` | SSH wrapper (→ `~/.local/bin/`) |
 | `scp` | SCP wrapper, delegates to ssh wrapper via `-S` (→ `~/.local/bin/`) |
+| `psono-autofill` | Browser credential filler (→ `~/.local/bin/`) |
 | `config.json` | Account list + agent settings (→ `~/.config/psono-agent/`) |
 | `psono-ssh-agent.service` | Systemd unit (→ `~/.config/systemd/user/`) |
 | `ssh-completion.bash` | Bash completion for ssh wrapper (→ `~/.local/share/bash-completion/completions/ssh`) |
