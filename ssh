@@ -160,7 +160,7 @@ main() {
     else
         # Cache miss or no daemon; use a temp single-key agent
         sock_path="/tmp/psono-ssh-$$.sock"
-        key_opts=()  # not needed — temp agent has only one key
+        key_opts=(-o "IdentitiesOnly=no")  # override ssh_config; temp agent has only one key
         eval "$(ssh-agent -a "$sock_path" 2>/dev/null)" >/dev/null
         agent_pid="$SSH_AGENT_PID"
 

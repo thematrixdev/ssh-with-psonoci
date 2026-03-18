@@ -4,6 +4,7 @@ After=default.target
 
 [Service]
 Type=simple
+Environment="PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 ExecStart=/usr/bin/bash %h/.local/bin/psono-ssh-agent.sh
 Restart=on-failure
 RestartSec=5
