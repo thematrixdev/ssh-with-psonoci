@@ -9,6 +9,7 @@
 # No match: passes through to /usr/bin/ssh unchanged
 
 SSH_BIN="/usr/bin/ssh"
+SELF="$(realpath "$0")"
 CONFIG="$HOME/.config/psono-agent/config.json"
 CACHE_DIR="$HOME/.cache/psono-agent"
 CACHE_FILE="$CACHE_DIR/secrets.json"
@@ -20,6 +21,36 @@ CACHE_HIT=0
 OPTS_WITH_ARG="bcDeFIiJLlmopQRSwW"
 
 expand_path() { echo "${1/#\~/$HOME}"; }
+
+# Rewrites -J jump-host into -o ProxyCommand="SELF -W %h:%p jump-host"
+# so the jump connection also routes through this wrapper.
+# Sets REWRITTEN_ARGS array.
+rewrite_jump() {
+    REWRITTEN_ARGS=()
+    local jump_host=""
+    local skip_next=0
+
+    for arg in "$@"; do
+        if [[ $skip_next -eq 1 ]]; then
+            jump_host="$arg"
+            skip_next=0
+            continue
+        fi
+        if [[ "$arg" == "-J" ]]; then
+            skip_next=1
+            continue
+        fi
+        if [[ "$arg" =~ ^-J(.+)$ ]]; then
+            jump_host="${BASH_REMATCH[1]}"
+            continue
+        fi
+        REWRITTEN_ARGS+=("$arg")
+    done
+
+    if [[ -n "$jump_host" ]]; then
+        REWRITTEN_ARGS=(-o "ProxyCommand=$SELF -W %h:%p $jump_host" "${REWRITTEN_ARGS[@]}")
+    fi
+}
 
 # Sets HOST_ALIAS from "$@"
 find_host_alias() {
@@ -124,6 +155,9 @@ main() {
     for arg in "$@"; do
         [[ "$arg" == "-V" || "$arg" == "-Q" ]] && exec "$SSH_BIN" "$@"
     done
+
+    rewrite_jump "$@"
+    set -- "${REWRITTEN_ARGS[@]}"
 
     find_host_alias "$@"
     [[ -z "$HOST_ALIAS" ]] && exec "$SSH_BIN" "$@"
