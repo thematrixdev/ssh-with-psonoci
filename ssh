@@ -114,6 +114,7 @@ find_secret() {
         psono_cfg=$(expand_path "$(jq -r ".accounts[$i].psono_config" "$CONFIG")")
 
         secrets=$(psonoci -c "$psono_cfg" api-key secrets 2>/dev/null) || continue
+        secrets=$(echo "$secrets" | jq 'with_entries(select(.value.secret_type == "SSHKey"))')
 
         secret_id=$(echo "$secrets" | jq -r --arg h "$host" \
             'to_entries[] | select(.value.title == $h) | .key' | head -1)

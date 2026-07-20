@@ -67,6 +67,9 @@ load_keys() {
             continue
         fi
 
+        # api-key secrets now returns all secret types; keep only SSH keys
+        secrets=$(echo "$secrets" | jq 'with_entries(select(.value.secret_type == "SSHKey"))')
+
         # Build cache: title → { notes, secret_id, psono_config }
         cache_obj=$(echo "$secrets" | jq --arg cfg "$psono_cfg" --argjson existing "$cache_obj" '
             reduce to_entries[] as $e ($existing;
